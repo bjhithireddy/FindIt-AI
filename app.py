@@ -1,137 +1,164 @@
-import time
-import requests
+
 import streamlit as st
+import requests
+import time
+from io import BytesIO
+from pypdf import PdfReader
+from docx import Document
 
 st.set_page_config(page_title="FindIt AI", page_icon="🎓", layout="centered")
 
-DEFAULT_API_URL = "https://findit-ai-62d3c77f-763b-49c7-85b0-4bb70314d-4e9d1cbf.crewai.com"
+st.title("🎓 FindIt AI")
+st.write("Your AI Student Action Agent — ask questions, understand topics and get help with your studies.")
 
-st.markdown("""
-<style>
-.main {max-width: 850px; padding-top: 2rem;}
-.hero {padding: 1.5rem; border-radius: 18px; background: linear-gradient(120deg,#e8f4fa,#f5f9ff); border: 1px solid #d5e8f3;}
-.hero h1 {color:#1f2d3f; margin:0;}
-.hero p {color:#42566b; margin:.45rem 0 0;}
-.stChatMessage {border-radius: 14px;}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="hero">
-<h1>🎓 FindIt AI</h1>
-<p>Your student action assistant — ask questions, understand topics, and plan your next steps.</p>
-</div>
-""", unsafe_allow_html=True)
-
-# Credentials are stored in Streamlit Cloud Secrets, never in the public repository.
+# Read private settings from Streamlit Secrets
 try:
-    api_url = st.secrets.get("CREWAI_API_URL", DEFAULT_API_URL).rstrip("/")
-    token = st.secrets.get("CREWAI_BEARER_TOKEN", "")
+    API_URL = st.secrets["CREWAI_API_URL"].rstrip("/")
+    TOKEN = st.secrets["CREWAI_BEARER_TOKEN"]
 except Exception:
-    api_url = DEFAULT_API_URL
-    token = ""
-
-if not token:
-    st.warning("The website owner needs to add the CrewAI bearer token in the app's Secrets before chat can work.")
+    st.error("The app owner needs to configure the CrewAI settings in Streamlit Secrets.")
     st.stop()
 
+headers = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# Student details
+with st.expander("Your student details", expanded=True):
+    year = st.selectbox(
+        "Year of study",
+        ["1st year", "2nd year", "3rd year", "4th year"]
+    )
+    course = st.text_input("Course", "B.Tech Computer Science")
+    interests = st.text_input("Your interests", "AI, technology, web development")
+    exam_details = st.text_input("Upcoming exams", "No upcoming exams")
+
+st.subheader("📎 Upload your study document")
+uploaded_file = st.file_uploader(
+    "Choose a PDF, DOCX or TXT file",
+    type=["pdf", "docx", "txt"]
+)
+
+def extract_text(file):
+    file_bytes = file.getvalue()
+
+    if file.name.lower().endswith(".pdf"):
+        reader = PdfReader(BytesIO(file_bytes))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    if file.name.lower().endswith(".docx"):
+        document = Document(BytesIO(file_bytes))
+        return "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+    if file.name.lower().endswith(".txt"):
+        return file_bytes.decode("utf-8", errors="replace")
+
+    return ""
+
+study_document = ""
+
+if uploaded_file:
+    try:
+        study_document = extract_text(uploaded_file)
+        if study_document.strip():
+            st.success(f"Uploaded: {uploaded_file.name}")
+            st.caption(f"Extracted approximately {len(study_document)} characters.")
+        else:
+            st.warning("No readable text was found in this document.")
+    except Exception as e:
+        st.error(f"Could not read this file: {e}")
+
+# Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
-with st.sidebar:
-    st.subheader("About FindIt AI")
-    st.write("Ask a study question or request help planning your academic tasks.")
-    if st.button("Clear chat"):
-        st.session_state.messages = []
-        st.rerun()
-    st.caption("Your questions are sent to the FindIt AI CrewAI deployment.")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-prompt = st.chat_input("Ask FindIt AI a question…")
+question = st.chat_input("Ask FindIt AI anything about your studies...")
 
-if prompt:
-    st.session_state.messages.append({"role": "user", "content": prompt})
+if question:
+    st.session_state.messages.append({
+        "role": "user",
+        "content": question
+    })
+
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(question)
 
-    history = []
-    for item in st.session_state.messages[:-1]:
-        history.append(f'{item["role"].capitalize()}: {item["content"]}')
-    conversation_history = "\n".join(history[-12:])
+    conversation_history = "\n".join(
+        f'{m["role"]}: {m["content"]}'
+        for m in st.session_state.messages[-10:]
+    )
 
     inputs = {
-        "year": "Not specified",
-        "course": "Not specified",
-        "interests": "General student support",
-        "exam_details": "Not specified",
-        "study_document": "",
-        "student_request": prompt,
-        "conversation_history": conversation_history,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
+        "year": year,
+        "course": course,
+        "interests": interests,
+        "exam_details": exam_details,
+        "study_document": study_document,
+        "student_request": question,
+        "conversation_history": conversation_history
     }
 
     with st.chat_message("assistant"):
-        status_box = st.empty()
-        answer_box = st.empty()
-        try:
-            status_box.info("FindIt AI is thinking…")
-            kickoff_response = requests.post(
-                f"{api_url}/kickoff",
-                headers=headers,
-                json={"inputs": inputs},
-                timeout=45,
-            )
-            kickoff_response.raise_for_status()
-            kickoff_data = kickoff_response.json()
-            kickoff_id = kickoff_data.get("kickoff_id")
-            if not kickoff_id:
-                raise RuntimeError(f"CrewAI did not return a kickoff_id: {kickoff_data}")
-
-            final_data = None
-            deadline = time.time() + 240
-            while time.time() < deadline:
-                time.sleep(2)
-                status_response = requests.get(
-                    f"{api_url}/status/{kickoff_id}",
-                    headers=headers,
-                    timeout=30,
-                )
-                status_response.raise_for_status()
-                data = status_response.json()
-                state = str(data.get("state") or data.get("status") or "").upper()
-                if state in {"SUCCESS", "COMPLETED", "COMPLETE"}:
-                    final_data = data
-                    break
-                if state in {"FAILED", "ERROR"}:
-                    raise RuntimeError(data.get("error") or data.get("message") or str(data))
-            if final_data is None:
-                raise TimeoutError("This request is taking longer than expected. Please try again.")
-
-            result = final_data.get("result") or {}
-            answer = result.get("raw") or result.get("output") or result.get("result") or ""
-            if isinstance(answer, dict):
-                answer = answer.get("raw") or answer.get("output") or str(answer)
-            if not answer:
-                answer = str(result) if result else str(final_data)
-            status_box.empty()
-            answer_box.markdown(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-        except requests.HTTPError as e:
-            detail = ""
+        with st.spinner("FindIt AI is thinking..."):
             try:
-                detail = e.response.text
-            except Exception:
-                pass
-            error_text = f"Connection error from CrewAI ({getattr(e.response, 'status_code', 'unknown')}): {detail or str(e)}"
-            status_box.error(error_text)
-            st.session_state.messages.append({"role": "assistant", "content": "I couldn't reach the AI service. Please try again later."})
-        except Exception as e:
-            status_box.error(f"Something went wrong: {e}")
-            st.session_state.messages.append({"role": "assistant", "content": "I couldn't complete that request. Please try again."})
+                response = requests.post(
+                    f"{API_URL}/kickoff",
+                    headers=headers,
+                    json={"inputs": inputs},
+                    timeout=60
+                )
+                response.raise_for_status()
+                kickoff_data = response.json()
+                kickoff_id = kickoff_data.get("kickoff_id")
+
+                if not kickoff_id:
+                    st.error("The agent did not return a task ID. Please try again.")
+                    st.stop()
+
+                result_data = None
+
+                for _ in range(60):
+                    status_response = requests.get(
+                        f"{API_URL}/status/{kickoff_id}",
+                        headers=headers,
+                        timeout=30
+                    )
+                    status_response.raise_for_status()
+                    status_data = status_response.json()
+
+                    if status_data.get("state") == "SUCCESS":
+                        result_data = status_data.get("result", {})
+                        break
+
+                    if status_data.get("state") == "FAILED":
+                        st.error("The agent could not complete this request. Please try again.")
+                        st.stop()
+
+                    time.sleep(2)
+
+                if result_data is None:
+                    st.error("The agent is taking too long. Please try again.")
+                    st.stop()
+
+                answer = result_data.get("raw", "I couldn't find an answer. Please try again.")
+
+                st.markdown(answer)
+
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer
+                })
+
+            except requests.exceptions.RequestException as e:
+                st.error(f"Connection problem: {e}")
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
+
+if st.button("Clear chat"):
+    st.session_state.messages = []
+    st.rerun()
