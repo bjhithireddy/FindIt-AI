@@ -14,3 +14,4 @@ An AI-powered student assistant built using CrewAI and Streamlit.
 - Simple explanations of academic topics
 - Student-focused support
 - Document upload (being developed)
+## Report 
